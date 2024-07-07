@@ -8,9 +8,10 @@ import numpy as np
 import pandas
 import torch
 import torch.nn as nn
-import torchvision
 from torchvision import transforms
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, AutoTokenizer, AutoModelForSequenceClassification
+
+torch.cuda.empty_cache()
 
 def set_seed(seed):
     random.seed(seed)
@@ -22,11 +23,11 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def process_text(text):
+def process_text_for_dict(text):
     # lowercase
-    text = text.lower()
+    text = text.lower() # BERT tokenizerに元々備わっている
 
-    # 数詞を数字に変換
+    # 数詞を数字に変換 これは必要
     num_word_to_digit = {
         'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
         'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
@@ -41,7 +42,7 @@ def process_text(text):
     # 冠詞の削除
     text = re.sub(r'\b(a|an|the)\b', '', text)
 
-    # 短縮形のカンマの追加
+    # 短縮形のカンマの追加 これは必要
     contractions = {
         "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
         "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't", "hasnt": "hasn't"
@@ -50,16 +51,43 @@ def process_text(text):
         text = text.replace(contraction, correct)
 
     # 句読点をスペースに変換
-    text = re.sub(r"[^\w\s':]", ' ', text)
+    text = re.sub(r"[^\w\s':]", ' ', text) # 「?」や「.」もそれぞれencodingしてくれる
 
     # 句読点をスペースに変換
-    text = re.sub(r'\s+,', ',', text)
+    text = re.sub(r'\s+,', ',', text) # 「?」や「.」もそれぞれencodingしてくれる
 
     # 連続するスペースを1つに変換
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip() # BERT tokenizerに元々備わっている
 
     return text
 
+
+def process_text_for_question(text):
+
+  # 数詞を数字に変換 これは必要
+  num_word_to_digit = {
+      'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+      'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+      'ten': '10'
+  }
+  for word, digit in num_word_to_digit.items():
+      text = text.replace(word, digit)
+
+  # 小数点のピリオドを削除
+  text = re.sub(r'(?<!\d)\.(?!\d)', '', text)
+
+  # 冠詞の削除
+  text = re.sub(r'\b(a|an|the)\b', '', text)
+
+  # 短縮形のカンマの追加 これは必要
+  contractions = {
+      "dont": "don't", "isnt": "isn't", "arent": "aren't", "wont": "won't",
+      "cant": "can't", "wouldnt": "wouldn't", "couldnt": "couldn't", "hasnt": "hasn't"
+  }
+  for contraction, correct in contractions.items():
+      text = text.replace(contraction, correct)
+
+  return text
 
 # 1. データローダーの作成
 class VQADataset(torch.utils.data.Dataset):
@@ -67,9 +95,11 @@ class VQADataset(torch.utils.data.Dataset):
         self.transform = transform  # 画像の前処理
         self.image_dir = image_dir  # 画像ファイルのディレクトリ
         self.df = pandas.read_json(df_path)  # 画像ファイルのパス，question, answerを持つDataFrame
+        #self.question = question
         self.answer = answer
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        
+        self.question = self.df['question'].tolist()  # クラス変数として初期化
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased') # ★追加 大文字小文字を区別しないモデル
+
         # question / answerの辞書を作成
         self.question2idx = {}
         self.answer2idx = {}
@@ -78,7 +108,7 @@ class VQADataset(torch.utils.data.Dataset):
 
         # 質問文に含まれる単語を辞書に追加
         for question in self.df["question"]:
-            question = process_text(question)
+            question = process_text_for_dict(question)
             words = question.split(" ")
             for word in words:
                 if word not in self.question2idx:
@@ -90,7 +120,7 @@ class VQADataset(torch.utils.data.Dataset):
             for answers in self.df["answers"]:
                 for answer in answers:
                     word = answer["answer"]
-                    word = process_text(word)
+                    word = process_text_for_dict(word)
                     if word not in self.answer2idx:
                         self.answer2idx[word] = len(self.answer2idx)
             self.idx2answer = {v: k for k, v in self.answer2idx.items()}  # 逆変換用の辞書(answer)
@@ -131,32 +161,24 @@ class VQADataset(torch.utils.data.Dataset):
         """
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
-        # TODO: one-hotベクトルではなくtokenizer等を利用して分散表現に(BERT?)
-        question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
-        # TODO: 現）訓練データに存在する回答の中から適切なものを選択するクラス形式
-        # TODO: 未）訓練データに存在しない回答もカバーできるコーパスを利用（hugging faceのclass_mapping）
-        for word in question_words:
-            try:
-                question[self.question2idx[word]] = 1  # one-hot表現に変換
-            except KeyError:
-                question[-1] = 1  # 未知語
+        question = self.df["question"][idx]
+        processed_question = process_text_for_question(question) # MEMO: BERT tokenizerではできない処理を施す
+        question_tokens = self.tokenizer(processed_question, return_tensors='pt', padding='max_length', max_length=60, truncation=True)
 
         if self.answer:
-            answers = [self.answer2idx[process_text(answer["answer"])] for answer in self.df["answers"][idx]]
+            answers = [self.answer2idx[process_text_for_dict(answer["answer"])] for answer in self.df["answers"][idx]]
             mode_answer_idx = mode(answers)  # 最頻値を取得（正解ラベル）
 
-            return image, torch.Tensor(question), torch.Tensor(answers), int(mode_answer_idx)
+            return image, question_tokens['input_ids'].squeeze(), question_tokens['attention_mask'].squeeze(), torch.Tensor(answers), int(mode_answer_idx)
 
         else:
-            return image, torch.Tensor(question)
+            return image, question_tokens['input_ids'].squeeze(), question_tokens['attention_mask'].squeeze()
 
     def __len__(self):
         return len(self.df)
 
-
 # 2. 評価指標の実装
-# 簡単にするならBCEを利用する
+# 簡単にするならBCEを利用する # 実際，ここが評価に使われている(train_acc)
 def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
     total_acc = 0.
 
@@ -174,8 +196,7 @@ def VQA_criterion(batch_pred: torch.Tensor, batch_answers: torch.Tensor):
 
     return total_acc / len(batch_pred)
 
-
-# 3. モデルのの実装
+# 3. モデルの実装
 # ResNetを利用できるようにしておく
 class BasicBlock(nn.Module):
     expansion = 1
@@ -290,31 +311,31 @@ def ResNet18():
 def ResNet50():
     return ResNet(BottleneckBlock, [3, 4, 6, 3])
 
-
 class VQAModel(nn.Module):
-    def __init__(self, vocab_size: int, n_answer: int):
+    def __init__(self, n_answer: int):
         super().__init__()
-        self.resnet = ResNet18()
-        # self.text_encoder = nn.Linear(vocab_size, 512)
-        # ★追加：BERTに変更
-        self.text_encoder = BertModel.from_pretrained('bert-base-uncased')
+        self.resnet = ResNet50() # MEMO:ResNet50に変更
+        self.text_encoder = BertModel.from_pretrained('bert-base-uncased') # MEMO:BERTに変更
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased') # MEMO:BERTに変更
+        # BERTのhidden_sizeを取得
+        bert_hidden_size = self.text_encoder.config.hidden_size
 
+        # ResNetの出力次元とBERTのhidden_sizeを合わせて全結合層に入力
         self.fc = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(512 + bert_hidden_size, 512),
             nn.ReLU(inplace=True),
-            # nn.Dropout(0.25), # TODO: dropout層追加する？
+            nn.Dropout(0.5), # MEMO：Dropoutを追加, 割合は変更可
             nn.Linear(512, n_answer)
         )
 
-    def forward(self, image, question):
+    def forward(self, image, question_input_ids, question_attention_mask):
         image_feature = self.resnet(image)  # 画像の特徴量
-        question_feature = self.text_encoder(question)  # テキストの特徴量
-        # text_feature = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).pooler_output # question_featureの代わり？
-        x = torch.cat([image_feature, question_feature], dim=1)
+        text_feature = self.text_encoder(input_ids=question_input_ids, attention_mask=question_attention_mask).pooler_output  # テキストの特徴量
+        # text_feature = self.text_encoder(input_ids=question_input_ids, attention_mask=question_attention_mask)['last_hidden_state'][:, 0, :]
+        x = torch.cat([image_feature, text_feature], dim=1)
         x = self.fc(x)
 
         return x
-
 
 # 4. 学習の実装
 def train(model, dataloader, optimizer, criterion, device, scheduler, clip_value=1.0):
@@ -325,53 +346,38 @@ def train(model, dataloader, optimizer, criterion, device, scheduler, clip_value
     simple_acc = 0
 
     start = time.time()
-    
-    for image, question, answers, mode_answer in dataloader:
-        image, question, answer, mode_answer = \
-            image.to(device), question.to(device), answers.to(device), mode_answer.to(device)
+    for image, question_input_ids, question_attention_mask, answers, mode_answer in dataloader:
+        image, question_input_ids, question_attention_mask, answers, mode_answer = \
+            image.to(device), question_input_ids.to(device), question_attention_mask.to(device), answers.to(device), mode_answer.to(device)
 
-        pred = model(image, question)
+        pred = model(image, question_input_ids, question_attention_mask)
         loss = criterion(pred, mode_answer.squeeze())
 
         optimizer.zero_grad()
         loss.backward()
-        
-        # ★追加：勾配を絶対値1.0でクリッピングする
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)  # MEMO:勾配を絶対値1.0でクリッピングする
         optimizer.step()
 
         total_loss += loss.item()
         total_acc += VQA_criterion(pred.argmax(1), answers)  # VQA accuracy
         simple_acc += (pred.argmax(1) == mode_answer).float().mean().item()  # simple accuracy
 
-    scheduler.step() # ★追加：schedulerを追加
-    return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
+        scheduler.step() # MEMO:schedulerを追加
 
-
-def eval(model, dataloader, optimizer, criterion, device):
-    model.eval()
-
-    total_loss = 0
-    total_acc = 0
-    simple_acc = 0
-
-    start = time.time()
-    with torch.no_grad(): # ★追加
-        for image, question, answers, mode_answer in dataloader:
-            # ★下のanswersがanswerだったので変更したが大丈夫だった...？
-            image, question, answers, mode_answer = \
-                image.to(device), question.to(device), answers.to(device), mode_answer.to(device)
-
-            pred = model(image, question)
-            loss = criterion(pred, mode_answer.squeeze())
-
-            total_loss += loss.item()
-            total_acc += VQA_criterion(pred.argmax(1), answers)  # VQA accuracy
-            simple_acc += (pred.argmax(1) == mode_answer).mean().item()  # simple accuracy
+        # メモリの解放
+        del image, question_input_ids, question_attention_mask, answers, mode_answer, pred, loss
+        torch.cuda.empty_cache()
 
     return total_loss / len(dataloader), total_acc / len(dataloader), simple_acc / len(dataloader), time.time() - start
 
+class gcn(): # MEMO: data augumentationでgcaを追加
+    def __init__(self):
+        pass
+
+    def __call__(self, x):
+        mean = torch.mean(x)
+        std = torch.std(x)
+        return (x - mean)/(std + 10**(-6))  # 0除算を防ぐ
 
 def main():
     # deviceの設定
@@ -379,71 +385,58 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # dataloader / model
-    # TODO: 画像に対する前処理を加える
-    transform = transforms.Compose([
-        
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
+    # MEMO: 画像に対する前処理を加える
+    train_transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.2),
+        transforms.RandomRotation(degrees=(-15, 15)),
+        transforms.RandomResizedCrop(128, scale=(0.8, 1.0)),  # 動的クロップ
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        transforms.Resize((224, 224)),  # メモリ足りないので224→128に
+        transforms.ToTensor(),
+        gcn()
     ])
-    train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
-    test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
+    test_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        gcn()
+    ])
+    train_dataset = VQADataset(df_path="/content/drive/MyDrive/VQA/train.json", image_dir=train_data, transform=train_transform)
+    test_dataset = VQADataset(df_path="/content/drive/MyDrive/VQA/valid.json", image_dir=valid_data, transform=test_transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=50, shuffle=True) # MEMO: バッチサイズを128から50に
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
+    model = VQAModel(n_answer=len(train_dataset.answer2idx)).to(device) # MEMO:VQAModelの中身変更の影響で形式変更
 
     # optimizer / criterion
     num_epoch = 20
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1) # ★追加: schedulerの追加
-    
-    # ★追加：Early Stoppingの追加(今回はtrain loss ver)
-    patience = 5
-    best_train_loss = float('inf')
-    epochs_no_improve = 0
-    
-    # train model
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1) # MEMO: schedulerの追加
+
+    # train model MEMO:eval関数は元コードと同様なしの方向で
     for epoch in range(num_epoch):
-        train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device)
-        # eval_loss, eval_acc, eval_simple_acc, eval_time = eval(model, test_loader, optimizer, criterion, device)
-        # ★追加：eval 関数の追加はしなくていいの？
+        train_loss, train_acc, train_simple_acc, train_time = train(model, train_loader, optimizer, criterion, device, scheduler)
         print(f"【{epoch + 1}/{num_epoch}】\n"
               f"train time: {train_time:.2f} [s]\n"
               f"train loss: {train_loss:.4f}\n"
               f"train acc: {train_acc:.4f}\n"
               f"train simple acc: {train_simple_acc:.4f}")
-        
-        # ★追加：trainに対するearly stoppingを適用したが，通常validに対してなので意味ない？
-        if train_loss < best_train_loss:
-            best_train_loss = train_loss
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-        
-        if epochs_no_improve >= patience:
-            print(f"train loss did not improve for {patience} consecutive epochs. Stopping training.")
-            break
 
     # 提出用ファイルの作成
     model.eval()
     submission = []
-    for image, question in test_loader:
-        image, question = image.to(device), question.to(device)
-        pred = model(image, question)
+    for image, question_input_ids, question_attention_mask in test_loader:
+        image, question_input_ids, question_attention_mask = image.to(device), question_input_ids.to(device), question_attention_mask.to(device)
+        pred = model(image, question_input_ids, question_attention_mask) # ★modelの中身の影響でfor~predを変更
         pred = pred.argmax(1).cpu().item()
         submission.append(pred)
 
     submission = [train_dataset.idx2answer[id] for id in submission]
     submission = np.array(submission)
-    torch.save(model.state_dict(), "model.pth")
-    np.save("submission.npy", submission)
+    torch.save(model.state_dict(), "/content/drive/MyDrive/Colab Notebooks/DLBasics2023_colab/model2.pth")
+    np.save("/content/drive/MyDrive/Colab Notebooks/DLBasics2023_colab/submission2.npy", submission)
 
 if __name__ == "__main__":
     main()
-
-# TODO: 学習スケジューラ（torch.optim.lr_scheduler）の導入 OK
-# TODO: 勾配効果の最適化の手法（LSTMで使っていたようなやつ）の導入 OK
-# TODO: early stoppingの導入 validに使えないと意味ない...？
