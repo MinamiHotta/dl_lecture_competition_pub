@@ -1,5 +1,22 @@
 # DL基礎講座2024　最終課題「Visual Question Answering（VQA）」
 
+## 概要
+### 最終課題内容：3つのタスクから1つ選び，高い性能となるモデルを開発してください（コンペティション形式）
+3つのタスクはそれぞれ以下の通りです．必ず**1つ**を選んで提出してください．
+- 脳波分類（[`MEG-competition`](https://github.com/ailorg/dl_lecture_competition_pub/tree/MEG-competition)ブランチ）: 被験者が画像を見ているときの脳波から，その画像がどのクラスに属するかを分類する．
+  - サンプル数: 訓練65,728サンプル，検証16,432サンプル，テスト16,432サンプル．
+  - 入力: 脳波データ．
+  - 出力: 1854クラスのラベル．
+  - 評価指標: top-10 accuracy（モデルの予測確率トップ10に正解クラスが含まれているかどうか）．
+- Visual Question Answering（VQA）（[`VQA-competition`](https://github.com/ailorg/dl_lecture_competition_pub/tree/VQA-competition)ブランチ）: 画像と質問から，回答を予測する．
+  - 入力: 画像データ（RGB，サイズは画像によって異なる），質問文（サンプルごとに長さは異なる）．
+  - 出力: 回答文（サンプルごとに長さは異なる）．
+  - 評価指標: VQAでの評価指標（[こちら](https://visualqa.org/evaluation.html)を参照）を利用．
+- Optical Flow Prediction from Event Camera (EventCamera)（[`event-camera-competition`](https://github.com/ailorg/dl_lecture_competition_pub/tree/event-camera-competition)ブランチ）: イベントカメラのデータから，Optical Flowを予測する．
+  - サンプル数: 訓練7,800サンプル，テスト2,100サンプル．
+  - 入力: イベントデータ（各時刻，どのピクセルで"log intensity"に変化があったかを記録）．
+  - 出力: Optical Flow（連続フレーム間で，各ピクセルの動きをベクトルで表したもの）．
+  - 評価指標: Average Endpoint Error（推定したOptical Flowと正解のOptical Flowのユークリッド距離）．
 
 ## 環境構築
 ### Conda
@@ -10,8 +27,12 @@ pip install -r requirements.txt
 ### Docker
 - Dockerイメージのcudaバージョンについては，ご自身が利用するGPUに合わせて変更してください．
 ```bash
+
 docker build -t <イメージ名> .
 docker run -it -v $PWD:/workspace -w /workspace <イメージ名> bash
+
+$ cd dl_lecture_competition_pub
+$ git checkout [Competition name]
 ```
 
 ## ベースラインモデルを動かす
